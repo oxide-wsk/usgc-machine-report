@@ -348,35 +348,26 @@ else
     disk_percent=$(awk -v used="$root_used" -v total="$root_total" 'BEGIN { printf "%.2f", (used / total) * 100 }')
 fi
 
-# Last login and Uptime
+# Last login
+last_login_line=$(last "$USER" 2>/dev/null | grep -v "^$" | grep -v "^wtmp" | head -1)
+if [ -n "$last_login_line" ]; then
+    last_login_ip=$(echo "$last_login_line" | awk '{print $3}')
+    if [[ "$last_login_ip" =~ ^[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
+        last_login_ip_present=1
+        last_login_time=$(echo "$last_login_line" | awk '{print $4, $5, $6, $7}')
+    else
+        last_login_time=$(echo "$last_login_line" | awk '{print $3, $4, $5, $6}')
+    fi
+else
+    last_login_time="Never logged in"
+fi
+
+# Uptime
 case $PLATFORM in
     Linux)
-        last_login=$(lastlog -u "$USER")
-        last_login_ip=$(echo "$last_login" | awk 'NR==2 {print $3}')
-        if [[ "$last_login_ip" =~ ^[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
-            last_login_ip_present=1
-            last_login_time=$(echo "$last_login" | awk 'NR==2 {print $6, $7, $10, $8}')
-        else
-            last_login_time=$(echo "$last_login" | awk 'NR==2 {print $4, $5, $8, $6}')
-            if [ "$last_login_time" = "in**" ]; then
-                last_login_time="Never logged in"
-            fi
-        fi
-        sys_uptime=$(uptime -p | sed 's/up\s*//; s/\s*day\(s*\)/d/; s/\s*hour\(s*\)/h/; s/\s*minute\(s*\)/m/')
+        sys_uptime=$(uptime -p | sed 's/up\s*//; s/\s*week\(s*\)/w/; s/\s*day\(s*\)/d/; s/\s*hour\(s*\)/h/; s/\s*minute\(s*\)/m/')
         ;;
     SunOS)
-        last_login_line=$(last "$USER" 2>/dev/null | grep -v "^$" | grep -v "^wtmp" | head -1)
-        if [ -n "$last_login_line" ]; then
-            last_login_ip=$(echo "$last_login_line" | awk '{print $3}')
-            if [[ "$last_login_ip" =~ ^[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
-                last_login_ip_present=1
-                last_login_time=$(echo "$last_login_line" | awk '{print $4, $5, $6, $7}')
-            else
-                last_login_time=$(echo "$last_login_line" | awk '{print $3, $4, $5, $6}')
-            fi
-        else
-            last_login_time="Never logged in"
-        fi
         boot_time=$(kstat -p unix:0:system_misc:boot_time 2>/dev/null | cut -f2)
         if [ -n "$boot_time" ]; then
             now=$(date +%s)
