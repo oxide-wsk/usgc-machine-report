@@ -143,8 +143,8 @@ PRINT_DATA() {
 
     # Truncate or pad data
     local data_len=${#data}
-    if (( data_len >= MAX_DATA_LEN || data_len == MAX_DATA_LEN-1 )); then
-        data=$(echo "$data" | cut -c 1-$((MAX_DATA_LEN-3-2)))...
+    if (( data_len > max_data_len )); then
+        data="$(echo "$data" | cut -c 1-$((max_data_len - 3)))..."
     else
         data=$(printf "%-${max_data_len}s" "$data")
     fi
@@ -256,7 +256,7 @@ fi
 if [ -z "$net_hostname" ]; then net_hostname="Not Defined"; fi
 
 net_machine_ip=$(get_ip_addr)
-net_client_ip=$(who am i | awk '{print $5}' | tr -d '()')
+net_client_ip=$(who am i | grep -o '([^)]*)' | tr -d '()')
 if [ -z "$net_client_ip" ]; then
     net_client_ip="Not connected"
 fi
