@@ -15,7 +15,7 @@ BORDERS_AND_PADDING=7
 report_title="UNITED STATES GRAPHICS COMPANY"
 last_login_ip_present=0
 zfs_present=0
-zfs_filesystem="zroot/ROOT/os"
+zfs_filesystem=""
 
 # Utilities
 max_length() {
@@ -196,24 +196,25 @@ get_ip_addr() {
     ipv6_address=""
 
     # Check if ifconfig command exists
-    if command -v ifconfig &> /dev/null; then
-        # Try to get IPv4 address using ifconfig
-        ipv4_address=$(ifconfig | awk '
-            /^[a-z]/ {iface=$1}
-            iface != "lo:" && iface !~ /^docker/ && /inet / && !found_ipv4 {found_ipv4=1; print $2}')
-
-        # If IPv4 address not available, try IPv6 using ifconfig
+    if command -v ipadm &> /dev/null; then
+        ipv4_address=$(ipadm show-addr -p -o ADDROBJ,ADDR 2>/dev/null | \
+            awk -F: '$1 !~ /^lo/ {split($2, a, "/"); if (a[1] ~ /^[0-9]+\./) {print a[1]; exit}}')
         if [ -z "$ipv4_address" ]; then
-            ipv6_address=$(ifconfig | awk '
+            ipv6_address=$(ipadm show-addr -p -o ADDROBJ,ADDR 2>/dev/null | \
+                awk -F: '$1 !~ /^lo/ {split($2, a, "/"); if (a[1] ~ /:/) {print a[1]; exit}}')
+        fi
+    elif command -v ifconfig &> /dev/null; then
+        ipv4_address=$(ifconfig -a 2>/dev/null | awk '
+            /^[a-z]/ {iface=$1}
+            iface !~ /^lo/ && iface !~ /^docker/ && /inet / && !found_ipv4 {found_ipv4=1; print $2}')
+        if [ -z "$ipv4_address" ]; then
+            ipv6_address=$(ifconfig -a 2>/dev/null | awk '
                 /^[a-z]/ {iface=$1}
-                iface != "lo:" && iface !~ /^docker/ && /inet6 / && !found_ipv6 {found_ipv6=1; print $2}')
+                iface !~ /^lo/ && iface !~ /^docker/ && /inet6 / && !found_ipv6 {found_ipv6=1; split($2, a, "/"); print a[1]}')
         fi
     elif command -v ip &> /dev/null; then
-        # Try to get IPv4 address using ip addr
         ipv4_address=$(ip -o -4 addr show | awk '
             $2 != "lo" && $2 !~ /^docker/ {split($4, a, "/"); if (!found_ipv4++) print a[1]}')
-
-        # If IPv4 address not available, try IPv6 using ip addr
         if [ -z "$ipv4_address" ]; then
             ipv6_address=$(ip -o -6 addr show | awk '
                 $2 != "lo" && $2 !~ /^docker/ {split($4, a, "/"); if (!found_ipv6++) print a[1]}')
@@ -232,8 +233,16 @@ get_ip_addr() {
 }
 
 # Operating System Information
-source /etc/os-release
-os_name="${ID^} ${VERSION} ${VERSION_CODENAME^}"
+if [ -f /etc/os-release ]; then
+    source /etc/os-release
+    if [ -n "$PRETTY_NAME" ]; then
+        os_name="$PRETTY_NAME"
+    else
+        os_name="${ID:-$(uname -s)} ${VERSION:-$(uname -v)}"
+    fi
+else
+    os_name="$(uname -s) $(uname -v)"
+fi
 os_kernel=$({ uname; uname -r; } | tr '\n' ' ')
 
 # Network Information
@@ -241,7 +250,7 @@ net_current_user=$(whoami)
 if ! [ "$(command -v hostname)" ]; then
     net_hostname=$(grep -w "$(uname -n)" /etc/hosts | awk '{print $2}' | head -n 1)
 else
-    net_hostname=$(hostname -f)
+    net_hostname=$(hostname)
 fi
 
 if [ -z "$net_hostname" ]; then net_hostname="Not Defined"; fi
@@ -254,67 +263,89 @@ fi
 net_dns_ip=($(grep '^nameserver [0-9.]' /etc/resolv.conf | awk '{print $2}'))
 
 # CPU Information
-cpu_model="$(lscpu | grep 'Model name' | grep -v 'BIOS' | cut -f 2 -d ':' | awk '{print $1 " "  $2 " " $3 " " $4}')"
-cpu_hypervisor="$(lscpu | grep 'Hypervisor vendor' | cut -f 2 -d ':' | awk '{$1=$1}1')"
-if [ -z "$cpu_hypervisor" ]; then
-    cpu_hypervisor="Bare Metal"
+cpu_model=$(kstat -p cpu_info:0:cpu_info0:brand 2>/dev/null | cut -f2)
+if [ -z "$cpu_model" ]; then
+    cpu_model="Unknown"
 fi
 
-cpu_cores="$(nproc --all)"
-cpu_cores_per_socket="$(lscpu | grep 'Core(s) per socket' | cut -f 2 -d ':'| awk '{$1=$1}1')"
-cpu_sockets="$(lscpu | grep 'Socket(s)' | cut -f 2 -d ':' | awk '{$1=$1}1')"
-cpu_freq="$(grep 'cpu MHz' /proc/cpuinfo | cut -f 2 -d ':' | awk 'NR==1 { printf "%.2f", $1 / 1000 }')" # Convert from M to G units
+cpu_hypervisor="Bare Metal"
+
+cpu_cores=$(psrinfo | wc -l | tr -d ' ')
+cpu_cores_per_socket=$(kstat -p cpu_info:0:cpu_info0:ncore_per_chip 2>/dev/null | cut -f2 | tr -d ' ')
+if [ -z "$cpu_cores_per_socket" ]; then
+    cpu_cores_per_socket="$cpu_cores"
+fi
+cpu_sockets=$(psrinfo -p 2>/dev/null)
+if [ -z "$cpu_sockets" ]; then
+    cpu_sockets=1
+fi
+cpu_freq=$(kstat -p cpu_info:0:cpu_info0:clock_MHz 2>/dev/null | cut -f2 | awk '{ printf "%.2f", $1 / 1000 }')
 
 load_avg_1min=$(uptime | awk -F'load average: ' '{print $2}' | cut -d ',' -f1 | tr -d ' ')
 load_avg_5min=$(uptime | awk -F'load average: ' '{print $2}' | cut -d ',' -f2 | tr -d ' ')
 load_avg_15min=$(uptime| awk -F'load average: ' '{print $2}' | cut -d ',' -f3 | tr -d ' ')
 
-# Memory Information
-mem_total=$(grep 'MemTotal' /proc/meminfo | awk '{print $2}')
-mem_available=$(grep 'MemAvailable' /proc/meminfo | awk '{print $2}')
+# Memory Information (values in KB to match downstream calculations)
+mem_total_mb=$(prtconf 2>/dev/null | awk '/^Memory size:/ {print $3}')
+mem_total=$((mem_total_mb * 1024))
+pagesize_bytes=$(pagesize)
+freemem_pages=$(kstat -p unix:0:system_pages:freemem 2>/dev/null | cut -f2)
+mem_available=$((freemem_pages * pagesize_bytes / 1024))
 mem_used=$((mem_total - mem_available))
 mem_percent=$(awk -v used="$mem_used" -v total="$mem_total" 'BEGIN { printf "%.2f", (used / total) * 100 }')
 mem_percent=$(printf "%.2f" "$mem_percent")
-mem_total_gb=$(echo "$mem_total" | awk '{ printf "%.2f", $1 / (1024 * 1024) }') # (From Ki to Gi units)
-mem_available_gb=$(echo "$mem_available" | awk '{ printf "%.2f", $1 / (1024 * 1024) }') # (From Ki to Gi units) Not used currently
+mem_total_gb=$(echo "$mem_total" | awk '{ printf "%.2f", $1 / (1024 * 1024) }')
+mem_available_gb=$(echo "$mem_available" | awk '{ printf "%.2f", $1 / (1024 * 1024) }')
 mem_used_gb=$(echo "$mem_used" | awk '{ printf "%.2f", $1 / (1024 * 1024) }')
 
 # Disk Information
-if [ "$(command -v zfs)" ] && [ "$(grep -q "zfs" /proc/mounts)" ]; then
+if command -v zfs &>/dev/null && grep -q zfs /etc/mnttab 2>/dev/null; then
     zfs_present=1
-    zfs_health=$(zpool status -x zroot | grep -q "is healthy" && echo  "HEALTH O.K.")
+    zfs_filesystem=$(df -k / | awk 'NR==2 {print $1}')
+    zfs_pool=$(echo "$zfs_filesystem" | cut -d/ -f1)
+    zfs_health=$(zpool status -x "$zfs_pool" 2>/dev/null | grep -q "is healthy" && echo "HEALTH O.K.")
     zfs_available=$(zfs get -o value -Hp available "$zfs_filesystem")
     zfs_used=$(zfs get -o value -Hp used "$zfs_filesystem")
-    zfs_available_gb=$(echo "$zfs_available" | awk '{ printf "%.2f", $1 / (1024 * 1024 * 1024) }') # (To G units)
-    zfs_used_gb=$(echo "$zfs_used" | awk '{ printf "%.2f", $1 / (1024 * 1024 * 1024) }') # (To G units)
+    zfs_available_gb=$(echo "$zfs_available" | awk '{ printf "%.2f", $1 / (1024 * 1024 * 1024) }')
+    zfs_used_gb=$(echo "$zfs_used" | awk '{ printf "%.2f", $1 / (1024 * 1024 * 1024) }')
     disk_percent=$(awk -v used="$zfs_used" -v available="$zfs_available" 'BEGIN { printf "%.2f", (used / available) * 100 }')
 else
-    # Thanks https://github.com/AnarchistHoneybun
     root_partition="/"
-    root_used=$(df -m "$root_partition" | awk 'NR==2 {print $3}')
-    root_total=$(df -m "$root_partition" | awk 'NR==2 {print $2}')
+    root_used=$(df -k "$root_partition" | awk 'NR==2 {printf "%.0f", $3 / 1024}')
+    root_total=$(df -k "$root_partition" | awk 'NR==2 {printf "%.0f", $2 / 1024}')
     root_total_gb=$(awk -v total="$root_total" 'BEGIN { printf "%.2f", total / 1024 }')
     root_used_gb=$(awk -v used="$root_used" 'BEGIN { printf "%.2f", used / 1024 }')
     disk_percent=$(awk -v used="$root_used" -v total="$root_total" 'BEGIN { printf "%.2f", (used / total) * 100 }')
 fi
 
 # Last login and Uptime
-last_login=$(lastlog -u "$USER")
-last_login_ip=$(echo "$last_login" | awk 'NR==2 {print $3}')
-
-# Check if last_login_ip is an IP address
-if [[ "$last_login_ip" =~ ^[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
-    last_login_ip_present=1
-    last_login_time=$(echo "$last_login" | awk 'NR==2 {print $6, $7, $10, $8}')
-else
-    last_login_time=$(echo "$last_login" | awk 'NR==2 {print $4, $5, $8, $6}')
-    # Check for **Never logged in** edge case
-    if [ "$last_login_time" = "in**" ]; then
-        last_login_time="Never logged in"
+last_login_line=$(last "$USER" 2>/dev/null | grep -v "^$" | grep -v "^wtmp" | head -1)
+if [ -n "$last_login_line" ]; then
+    last_login_ip=$(echo "$last_login_line" | awk '{print $3}')
+    if [[ "$last_login_ip" =~ ^[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
+        last_login_ip_present=1
+        last_login_time=$(echo "$last_login_line" | awk '{print $4, $5, $6, $7}')
+    else
+        last_login_time=$(echo "$last_login_line" | awk '{print $3, $4, $5, $6}')
     fi
+else
+    last_login_time="Never logged in"
 fi
 
-sys_uptime=$(uptime -p | sed 's/up\s*//; s/\s*day\(s*\)/d/; s/\s*hour\(s*\)/h/; s/\s*minute\(s*\)/m/')
+boot_time=$(kstat -p unix:0:system_misc:boot_time 2>/dev/null | cut -f2)
+if [ -n "$boot_time" ]; then
+    now=$(date +%s)
+    uptime_secs=$((now - boot_time))
+    uptime_days=$((uptime_secs / 86400))
+    uptime_hours=$(( (uptime_secs % 86400) / 3600 ))
+    uptime_mins=$(( (uptime_secs % 3600) / 60 ))
+    sys_uptime=""
+    [ "$uptime_days" -gt 0 ] && sys_uptime="${uptime_days}d "
+    [ "$uptime_hours" -gt 0 ] && sys_uptime="${sys_uptime}${uptime_hours}h "
+    sys_uptime="${sys_uptime}${uptime_mins}m"
+else
+    sys_uptime="Unknown"
+fi
 
 # Set current length before graphs get calculated
 set_current_len
