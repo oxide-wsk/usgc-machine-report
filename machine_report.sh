@@ -16,6 +16,7 @@ report_title="UNITED STATES GRAPHICS COMPANY"
 last_login_ip_present=0
 zfs_present=0
 zfs_filesystem=""
+PLATFORM=$(uname -s)
 
 # Utilities
 max_length() {
@@ -250,7 +251,10 @@ net_current_user=$(whoami)
 if ! [ "$(command -v hostname)" ]; then
     net_hostname=$(grep -w "$(uname -n)" /etc/hosts | awk '{print $2}' | head -n 1)
 else
-    net_hostname=$(hostname)
+    case $PLATFORM in
+        Linux)  net_hostname=$(hostname -f) ;;
+        *)      net_hostname=$(hostname) ;;
+    esac
 fi
 
 if [ -z "$net_hostname" ]; then net_hostname="Not Defined"; fi
@@ -263,34 +267,56 @@ fi
 net_dns_ip=($(grep '^nameserver [0-9.]' /etc/resolv.conf | awk '{print $2}'))
 
 # CPU Information
-cpu_model=$(kstat -p cpu_info:0:cpu_info0:brand 2>/dev/null | cut -f2)
-if [ -z "$cpu_model" ]; then
-    cpu_model="Unknown"
-fi
-
-cpu_hypervisor="Bare Metal"
-
-cpu_cores=$(psrinfo | wc -l | tr -d ' ')
-cpu_cores_per_socket=$(kstat -p cpu_info:0:cpu_info0:ncore_per_chip 2>/dev/null | cut -f2 | tr -d ' ')
-if [ -z "$cpu_cores_per_socket" ]; then
-    cpu_cores_per_socket="$cpu_cores"
-fi
-cpu_sockets=$(psrinfo -p 2>/dev/null)
-if [ -z "$cpu_sockets" ]; then
-    cpu_sockets=1
-fi
-cpu_freq=$(kstat -p cpu_info:0:cpu_info0:clock_MHz 2>/dev/null | cut -f2 | awk '{ printf "%.2f", $1 / 1000 }')
+case $PLATFORM in
+    Linux)
+        cpu_model="$(lscpu | grep 'Model name' | grep -v 'BIOS' | cut -f 2 -d ':' | awk '{$1=$1}1')"
+        cpu_hypervisor="$(lscpu | grep 'Hypervisor vendor' | cut -f 2 -d ':' | awk '{$1=$1}1')"
+        if [ -z "$cpu_hypervisor" ]; then
+            cpu_hypervisor="Bare Metal"
+        fi
+        cpu_cores="$(nproc --all)"
+        cpu_cores_per_socket="$(lscpu | grep 'Core(s) per socket' | cut -f 2 -d ':' | awk '{$1=$1}1')"
+        cpu_sockets="$(lscpu | grep 'Socket(s)' | cut -f 2 -d ':' | awk '{$1=$1}1')"
+        cpu_freq="$(grep 'cpu MHz' /proc/cpuinfo | cut -f 2 -d ':' | awk 'NR==1 { printf "%.2f", $1 / 1000 }')"
+        ;;
+    SunOS)
+        cpu_model="$(kstat -p cpu_info:0:cpu_info0:brand 2>/dev/null | cut -f2)"
+        if [ -z "$cpu_model" ]; then
+            cpu_model="Unknown"
+        fi
+        cpu_hypervisor="Bare Metal"
+        cpu_cores=$(psrinfo | wc -l | tr -d ' ')
+        cpu_cores_per_socket=$(kstat -p cpu_info:0:cpu_info0:ncore_per_chip 2>/dev/null | cut -f2 | tr -d ' ')
+        if [ -z "$cpu_cores_per_socket" ]; then
+            cpu_cores_per_socket="$cpu_cores"
+        fi
+        cpu_sockets=$(psrinfo -p 2>/dev/null)
+        if [ -z "$cpu_sockets" ]; then
+            cpu_sockets=1
+        fi
+        cpu_freq=$(kstat -p cpu_info:0:cpu_info0:clock_MHz 2>/dev/null | cut -f2 | awk '{ printf "%.2f", $1 / 1000 }')
+        ;;
+esac
+cpu_model=$(echo "$cpu_model" | sed 's/([rRtTmM]*)//g; s/ *CPU *//; s/ *Processor *//; s/ *@.*GHz//; s/  */ /g; s/ *$//')
 
 load_avg_1min=$(uptime | awk -F'load average: ' '{print $2}' | cut -d ',' -f1 | tr -d ' ')
 load_avg_5min=$(uptime | awk -F'load average: ' '{print $2}' | cut -d ',' -f2 | tr -d ' ')
 load_avg_15min=$(uptime| awk -F'load average: ' '{print $2}' | cut -d ',' -f3 | tr -d ' ')
 
-# Memory Information (values in KB to match downstream calculations)
-mem_total_mb=$(prtconf 2>/dev/null | awk '/^Memory size:/ {print $3}')
-mem_total=$((mem_total_mb * 1024))
-pagesize_bytes=$(pagesize)
-freemem_pages=$(kstat -p unix:0:system_pages:freemem 2>/dev/null | cut -f2)
-mem_available=$((freemem_pages * pagesize_bytes / 1024))
+# Memory Information (values in KB for downstream calculations)
+case $PLATFORM in
+    Linux)
+        mem_total=$(grep 'MemTotal' /proc/meminfo | awk '{print $2}')
+        mem_available=$(grep 'MemAvailable' /proc/meminfo | awk '{print $2}')
+        ;;
+    SunOS)
+        mem_total_mb=$(prtconf 2>/dev/null | awk '/^Memory size:/ {print $3}')
+        mem_total=$((mem_total_mb * 1024))
+        pagesize_bytes=$(pagesize)
+        freemem_pages=$(kstat -p unix:0:system_pages:freemem 2>/dev/null | cut -f2)
+        mem_available=$((freemem_pages * pagesize_bytes / 1024))
+        ;;
+esac
 mem_used=$((mem_total - mem_available))
 mem_percent=$(awk -v used="$mem_used" -v total="$mem_total" 'BEGIN { printf "%.2f", (used / total) * 100 }')
 mem_percent=$(printf "%.2f" "$mem_percent")
@@ -299,7 +325,11 @@ mem_available_gb=$(echo "$mem_available" | awk '{ printf "%.2f", $1 / (1024 * 10
 mem_used_gb=$(echo "$mem_used" | awk '{ printf "%.2f", $1 / (1024 * 1024) }')
 
 # Disk Information
-if command -v zfs &>/dev/null && grep -q zfs /etc/mnttab 2>/dev/null; then
+case $PLATFORM in
+    Linux)  zfs_mounts_file="/proc/mounts" ;;
+    SunOS)  zfs_mounts_file="/etc/mnttab" ;;
+esac
+if command -v zfs &>/dev/null && grep -q zfs "$zfs_mounts_file" 2>/dev/null; then
     zfs_present=1
     zfs_filesystem=$(df -k / | awk 'NR==2 {print $1}')
     zfs_pool=$(echo "$zfs_filesystem" | cut -d/ -f1)
@@ -319,33 +349,50 @@ else
 fi
 
 # Last login and Uptime
-last_login_line=$(last "$USER" 2>/dev/null | grep -v "^$" | grep -v "^wtmp" | head -1)
-if [ -n "$last_login_line" ]; then
-    last_login_ip=$(echo "$last_login_line" | awk '{print $3}')
-    if [[ "$last_login_ip" =~ ^[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
-        last_login_ip_present=1
-        last_login_time=$(echo "$last_login_line" | awk '{print $4, $5, $6, $7}')
-    else
-        last_login_time=$(echo "$last_login_line" | awk '{print $3, $4, $5, $6}')
-    fi
-else
-    last_login_time="Never logged in"
-fi
-
-boot_time=$(kstat -p unix:0:system_misc:boot_time 2>/dev/null | cut -f2)
-if [ -n "$boot_time" ]; then
-    now=$(date +%s)
-    uptime_secs=$((now - boot_time))
-    uptime_days=$((uptime_secs / 86400))
-    uptime_hours=$(( (uptime_secs % 86400) / 3600 ))
-    uptime_mins=$(( (uptime_secs % 3600) / 60 ))
-    sys_uptime=""
-    [ "$uptime_days" -gt 0 ] && sys_uptime="${uptime_days}d "
-    [ "$uptime_hours" -gt 0 ] && sys_uptime="${sys_uptime}${uptime_hours}h "
-    sys_uptime="${sys_uptime}${uptime_mins}m"
-else
-    sys_uptime="Unknown"
-fi
+case $PLATFORM in
+    Linux)
+        last_login=$(lastlog -u "$USER")
+        last_login_ip=$(echo "$last_login" | awk 'NR==2 {print $3}')
+        if [[ "$last_login_ip" =~ ^[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
+            last_login_ip_present=1
+            last_login_time=$(echo "$last_login" | awk 'NR==2 {print $6, $7, $10, $8}')
+        else
+            last_login_time=$(echo "$last_login" | awk 'NR==2 {print $4, $5, $8, $6}')
+            if [ "$last_login_time" = "in**" ]; then
+                last_login_time="Never logged in"
+            fi
+        fi
+        sys_uptime=$(uptime -p | sed 's/up\s*//; s/\s*day\(s*\)/d/; s/\s*hour\(s*\)/h/; s/\s*minute\(s*\)/m/')
+        ;;
+    SunOS)
+        last_login_line=$(last "$USER" 2>/dev/null | grep -v "^$" | grep -v "^wtmp" | head -1)
+        if [ -n "$last_login_line" ]; then
+            last_login_ip=$(echo "$last_login_line" | awk '{print $3}')
+            if [[ "$last_login_ip" =~ ^[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
+                last_login_ip_present=1
+                last_login_time=$(echo "$last_login_line" | awk '{print $4, $5, $6, $7}')
+            else
+                last_login_time=$(echo "$last_login_line" | awk '{print $3, $4, $5, $6}')
+            fi
+        else
+            last_login_time="Never logged in"
+        fi
+        boot_time=$(kstat -p unix:0:system_misc:boot_time 2>/dev/null | cut -f2)
+        if [ -n "$boot_time" ]; then
+            now=$(date +%s)
+            uptime_secs=$((now - boot_time))
+            uptime_days=$((uptime_secs / 86400))
+            uptime_hours=$(( (uptime_secs % 86400) / 3600 ))
+            uptime_mins=$(( (uptime_secs % 3600) / 60 ))
+            sys_uptime=""
+            [ "$uptime_days" -gt 0 ] && sys_uptime="${uptime_days}d "
+            [ "$uptime_hours" -gt 0 ] && sys_uptime="${sys_uptime}${uptime_hours}h "
+            sys_uptime="${sys_uptime}${uptime_mins}m"
+        else
+            sys_uptime="Unknown"
+        fi
+        ;;
+esac
 
 # Set current length before graphs get calculated
 set_current_len
